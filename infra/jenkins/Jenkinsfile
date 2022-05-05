@@ -1,0 +1,137 @@
+def DEPLOY_TO
+
+pipeline {
+  agent { label 'master' }
+
+  parameters {
+    string(name:'MYSQL_HOST', defaultValue: 'thisisdevhost', description: 'dev mysql host')
+    string(name:'MYSQL_PASSWORD', defaultValue: 'thisisdevmysqlpassword', description: 'dev mysql password')
+  }
+
+  stages {
+    stage('Decide Deploy To') {
+      steps {
+        script {
+          if (env.BRANCH_NAME == 'master'){
+            DEPLOY_TO = 'prod'
+          } else if (env.BRANCH_NAME == 'develop'){
+            DEPLOY_TO = 'dev'
+          } else if (env.BRANCH_NAME == 'qa'){
+            DEPLOY_TO = 'qa'
+          }
+        }
+        
+        echo "DEPLOY_TO: ${DEPLOY_TO}"
+      }
+    }
+    
+    stage('Check deploy parameter') {
+      steps {
+        script {
+          withAWS(region:'ap-northeast-2', credentials:'jenkinsaws') {
+            def mysql_host = sh(script: "aws ssm get-parameters --name /${DEPLOY_TO}/MYSQL_HOST | jq '.Parameters[0].Value'", returnStdout: true).trim()
+            def mysql_password = sh(script: "aws ssm get-parameters --name /${DEPLOY_TO}/MYSQL_PASSWORD | jq '.Parameters[0].Value'", returnStdout: true).trim()
+            echo "${mysql_host}"
+          }
+        }
+      }
+    }
+
+    stage('Build website') {
+      steps{
+        echo 'Build website'
+      }
+
+      post {
+        failure {
+          error 'Website Build Failed'
+        }
+      }
+    }
+
+    stage('Deploy website') {
+      steps{
+        dir ('./website') {
+          script {
+            withAWS(region:'ap-northeast-2', credentials:'jenkinsaws') {
+              sh """
+              pwd &&
+              aws s3 sync ./ s3://${DEPLOY_TO}-namhoon-website
+              """
+            }
+          }
+        }
+      }
+
+      post {
+        success {
+            echo "Successfully Deployed Website In ${DEPLOY_TO} environment"
+
+            mail  to: 'frontalnh@gmail.com',
+                  subject: "Successfully Deployed Website In ${DEPLOY_TO} environment",
+                  body: "Successfully Deployed Website In ${DEPLOY_TO} environment"
+        }
+
+        failure {
+          echo "Failed deploy website"
+          echo "Redeploy stable S3 bucket version"
+        }
+      }
+    }
+
+    stage('Build Server'){
+      steps {
+        dir('./server') {
+          script {
+            withAWS(region: 'ap-northeast-2', credentials: 'jenkinsaws') {
+              def login = ecrLogin()
+              def mysql_host = sh(script: "aws ssm get-parameters --name /${DEPLOY_TO}/MYSQL_HOST | jq '.Parameters[0].Value'", returnStdout: true).trim()
+              def mysql_password = sh(script: "aws ssm get-parameters --name /${DEPLOY_TO}/MYSQL_PASSWORD | jq '.Parameters[0].Value'", returnStdout: true).trim()
+              echo "${login}"
+              // 실제 로그인
+              sh "${login}"
+              sh """
+              docker build --build-arg env=${DEPLOY_TO} --build-arg mysqlHost=${mysql_host} --build-arg mysqlPassword=${mysql_password} -t 551342549342.dkr.ecr.ap-northeast-2.amazonaws.com/${DEPLOY_TO}-webserver .
+              docker push 551342549342.dkr.ecr.ap-northeast-2.amazonaws.com/${DEPLOY_TO}-webserver
+              """
+            }
+          }
+        }
+      }
+
+      post {
+        success {
+          echo 'Successfully build webserver'
+
+          mail  to: 'frontalnh@gmail.com',
+                subject: "Build webserver succeeded",
+                body: "Build webserver succeeded"
+        }
+      }
+    }
+
+    stage('Deploy Server') {
+      agent {
+        label 'slave'
+      }
+
+      steps {
+        script {
+          withAWS(region:'ap-northeast-2', credentials: 'jenkinsaws') {
+            sh """
+              aws ecs update-service \
+                --region ap-northeast-2 \
+                --cluster ${DEPLOY_TO}-app \
+                --service ${DEPLOY_TO}-webserver \
+                --force-new-deployment \
+                --desired-count 2
+              aws ecs wait services-stable \
+                --cluster ${DEPLOY_TO}-app \
+                --services ${DEPLOY_TO}-webserver
+            """
+          }
+        }
+      }
+    }
+  }
+}
