@@ -1,24 +1,16 @@
-FROM node:11.13.0
-LABEL name="server"
+FROM node
 
-RUN mkdir app
-WORKDIR /app
+# set working directory
+WORKDIR /
 
-COPY ./package.json /app/package.json
+COPY . /
 
-RUN npm install
-
+# update apt packages
 ARG env
-ARG mysqlHost
-ARG mysqlPassword
-ENV APP_ENV=$env
-ENV MYSQL_HOST=$mysqlHost
-ENV MYSQL_PASSWORD=$mysqlPassword
-
-COPY . /app
+ENV APP_ENV=$env 
+RUN npm install
+RUN npm run build
 
 EXPOSE 80
 
-RUN echo 'Build Completed'
-
-CMD ["npm","start"]
+CMD [ "node","./dist/index.js" ]
